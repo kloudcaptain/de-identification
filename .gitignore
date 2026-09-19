@@ -1,0 +1,19 @@
+# Terraform state (contains resource details, sometimes sensitive)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Local Terraform working files
+.terraform/
+
+# Your actual variable values — never commit real config
+terraform.tfvars
+*.auto.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+# OS/editor cruft
+.DS_Store
+.vscode/
