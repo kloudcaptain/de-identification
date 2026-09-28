@@ -1,149 +1,119 @@
-# Document De-identification Lab — Azure (AKS + Terraform)
+Document De-identification Lab (Azure, AKS, Terraform)
 
-A production-minded Azure reference build for a **self-hosted document de-identification service** — a workload that detects and redacts PII/PHI from clinical-style documents before they move into research, analytics, or downstream systems. Designed with a healthcare and pharma audience in mind, where protected health information can never leak and every access must be provable.
+This is a hands-on Azure lab that builds the infrastructure for a self-hosted document de-identification service. The service detects and redacts PII and PHI from clinical style documents before they move into research, analytics, or anywhere downstream. I built it with a healthcare and pharma context in mind, where protected health information can't leak and every access to a document has to be provable.
 
-The entire environment is defined in Terraform and built to demonstrate the security and cost decisions a cloud engineer actually makes: sensitive data that never traverses the public internet, identity-based access with least privilege, customer-controlled encryption, a defensible audit trail, and deliberate separation of what a lab deploys versus what production would add.
+Everything here is defined in Terraform. The whole point was to work through the security and cost decisions a cloud engineer actually makes rather than just get something running: keeping sensitive data off the public internet, granting access by identity instead of stored credentials, encrypting under keys the operator controls, keeping a real audit trail, and being honest about what a lab deploys versus what production would need.
 
----
+Architecture
 
-## Architecture
+Show Image
 
-![Document De-identification Lab — Azure Architecture](docs/architecture.png)
+Primary region is East US 2.
 
-*Primary region: East US 2.*
+Public clients reach the service through an Azure Standard Load Balancer, which AKS provisions through a Kubernetes Service of type LoadBalancer. That routes to an NGINX ingress controller running inside the cluster.
 
-**Ingress path.** Public clients reach the service through an Azure Standard Load Balancer (provisioned by AKS via a `Service type: LoadBalancer`), which routes to an NGINX ingress controller running inside the cluster.
+The AKS cluster runs three logical pieces. There's the document-processing workload itself (the de-identification pods), a small system node pool that stays on all the time, and a GPU node pool that scales down to zero when nothing needs it, so GPU cost only shows up while documents are actually being processed.
 
-**Compute.** An AKS cluster runs three logical workloads: the **document-processing workload** (the de-identification pods), a small **system node pool** that stays always on, and a **GPU node pool** that scales to zero when idle, so GPU cost is only incurred while documents are actively being processed.
+The network is segmented. Everything sits inside one virtual network at 10.0.0.0/16, split into an AKS cluster subnet at 10.0.1.0/24 and a private endpoint subnet at 10.0.2.0/24, each with its own network security group. Outbound traffic leaves through a NAT Gateway for deterministic SNAT, and no cluster node gets a public IP. A private DNS zone resolves the private endpoints for blob, database, ACR, and vault.
 
-**Segmented network.** Everything sits inside a single virtual network (`10.0.0.0/16`), split into an **AKS cluster subnet** (`10.0.1.0/24`) and a **private endpoint subnet** (`10.0.2.0/24`), each with its own network security group. Outbound traffic leaves through a **NAT Gateway** providing deterministic outbound SNAT — no cluster node holds a public IP. A **private DNS zone** resolves the private endpoints for blob, database, ACR, and vault.
+All the backend resources are reachable only through private endpoints, never over the public internet:
 
-**Private data plane.** All backend resources are reachable only through private endpoints, never the public internet:
-- **Azure Blob Storage** — documents
-- **Azure SQL Database** — audit logs
-- **Azure Container Registry** — the de-identification container image
-- **Azure Key Vault** — application secrets and customer-managed encryption keys
+Azure Blob Storage holds the documents
+Azure SQL Database holds the audit logs
+Azure Container Registry holds the de-identification container image
+Azure Key Vault holds application secrets and the customer-managed encryption keys
 
-**Zero-trust identity.** The AKS service account federates to a user-assigned managed identity via workload identity, so the workload authenticates with no static credentials in code. Access is granted through narrowly scoped Azure RBAC roles — `Storage Blob Data Reader`, `Key Vault Secrets User`, `AcrPull`, a SQL data-plane role, `Log Analytics Reader`, and `Monitoring Reader`. Infrastructure roles grant no path to document data.
+For identity, the AKS service account federates to a user-assigned managed identity through workload identity, so the workload authenticates with nothing hardcoded. Access comes from narrowly scoped Azure roles: Storage Blob Data Reader, Key Vault Secrets User, AcrPull, a SQL data-plane role, Log Analytics Reader, and Monitoring Reader. None of the infrastructure roles give any path to the document data itself.
 
-**Encryption.** Key Vault holds two distinct things kept on separate access paths: application **secrets** (read by the workload via `Key Vault Secrets User`) and **customer-managed keys** (used by the storage and database managed identities to encrypt data at rest).
+Key Vault does two separate jobs on separate access paths. Application secrets are read by the workload through Key Vault Secrets User. The customer-managed keys are used by the storage and database managed identities to encrypt data at rest. Keeping those paths apart is deliberate.
 
-**Audit.** The document-processing workload emits an event on every document access — identity, document ID, operation, timestamp, and authorization result, and never the document contents — to a Log Analytics workspace via Azure Monitor.
+On the audit side, the document-processing workload writes an event on every document access. Each event records the identity, document ID, operation, timestamp, and authorization result, and never the document contents. Those events go to a Log Analytics workspace through Azure Monitor.
 
-**Deferred by design.** Application Gateway + WAF, Microsoft Defender for Containers, multi-region DR, and Azure Backup are documented as design considerations rather than deployed — a deliberate cost decision for a lab, with the production reasoning made explicit rather than hidden.
+A few things are drawn on the diagram as design considerations but aren't deployed in the lab: Application Gateway with WAF, Microsoft Defender for Containers, multi-region DR, and Azure Backup. Leaving them out is a cost decision for a lab, and I'd rather state that plainly than pretend the lab is production ready.
 
----
+What I was going for
+Keep protected data private. It never touches the public internet.
+Use identity instead of secrets. Federated workload identity and least-privilege roles rather than stored credentials.
+Keep cost low by design. The environment tears down and rebuilds between sessions, the GPU pool scales to zero, and nothing runs that isn't being used.
+Keep it reusable. Nothing subscription-specific is hardcoded, so anyone can clone it and deploy into their own subscription.
+Be honest about scope. What's deployed and what's deferred are clearly separated.
+Before you start
 
-## Design principles
+You'll need:
 
-- **Private by default** — protected data never touches the public internet.
-- **Identity over secrets** — federated workload identity and least-privilege RBAC instead of stored credentials.
-- **Cost-conscious by construction** — the whole environment tears down and rebuilds between sessions; the GPU pool scales to zero; nothing runs that isn't being used.
-- **Reusable** — nothing subscription-specific is hardcoded; anyone can clone and deploy into their own subscription.
-- **Honest scope** — what's deployed and what's deferred are clearly separated, with reasons.
+An Azure subscription
+Azure CLI, installed and logged in with az login
+Terraform 1.9 or newer
+kubectl, to talk to the cluster once it's up
 
----
+You also need enough vCPU quota in your region for the node pool sizes. If a deploy fails with a quota or SKU availability error, check what your region actually allows:
 
-## Prerequisites
-
-- An Azure subscription
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) installed and authenticated (`az login`)
-- [Terraform](https://developer.hashicorp.com/terraform/install) v1.9 or newer
-- [kubectl](https://kubernetes.io/docs/tasks/tools/) to interact with the cluster
-
-Sufficient vCPU quota is needed in your region for the node pool SKUs. If a deployment fails with a quota or SKU-availability error, check what's available with:
-
-```bash
 az vm list-usage --location <your-region> --output table
-```
 
----
+I hit this myself. The size I originally planned wasn't available in my subscription, and running that command is how I found one that was.
 
-## Configuration
+Setup
 
-All configurable values are Terraform variables — nothing subscription-specific is hardcoded.
+All the settings are Terraform variables, so there's nothing subscription-specific baked into the code.
 
-1. Copy the example variables file:
+Copy the example variables file:
 
-   ```bash
-   cp terraform.tfvars.example terraform.tfvars
-   ```
+cp terraform.tfvars.example terraform.tfvars
 
-2. Set your subscription ID in `terraform.tfvars`:
+Then set your subscription ID in terraform.tfvars:
 
-   ```hcl
-   subscription_id = "<your-azure-subscription-id>"
-   ```
+subscription_id = "<your-azure-subscription-id>"
 
-`terraform.tfvars` is gitignored and never committed. Region, resource group name, and node SKUs have sensible defaults in `variables.tf` and can be overridden here.
+terraform.tfvars is gitignored and never gets committed. Region, resource group name, and node sizes all have defaults in variables.tf, so override them here only if you want something different.
 
-> Subscription and tenant IDs are identifiers, not secrets, so they're safe to reference. Credentials (client secrets, access keys) must never be committed — this lab authenticates via your local Azure CLI session, so no secret is stored in code.
+One note on the IDs: subscription and tenant IDs are identifiers, not secrets, so referencing them is fine. Credentials like client secrets or access keys are a different story and never belong in the repo. This lab authenticates through your local Azure CLI session, so there's no secret stored in the code at all.
 
----
-
-## Deploy
-
-```bash
+Deploying
 terraform init
 terraform plan
 terraform apply
-```
 
-Connect to the cluster after apply:
+Once it's applied, connect to the cluster:
 
-```bash
 az aks get-credentials --resource-group <rg-name> --name <cluster-name> --overwrite-existing
 kubectl get nodes
-```
 
----
+You should see one node come back as Ready.
 
-## Tear down
-
-```bash
+Tearing it down
 terraform destroy
-```
 
-This removes the cluster, the resource group, and the AKS-managed `MC_` resource group automatically. Confirm clean state with:
+That removes the cluster, the resource group, and the AKS-managed MC_ resource group that Azure creates on its own. You can confirm nothing's left behind:
 
-```bash
-terraform show   # reports no resources after destroy
-```
+terraform show
 
-Rebuild takes only a few minutes, so the environment is only ever running while in active use — the core cost strategy.
+After a destroy it reports no resources. Rebuilding takes a few minutes, which is the whole idea. The environment only runs while I'm actually using it.
 
----
-
-## Repository structure
-
-```
+How the repo is laid out
 .
-├── main.tf                    # resource group + module calls
-├── providers.tf               # Terraform + azurerm provider config
-├── variables.tf               # root input variables
-├── outputs.tf                 # root outputs
-├── terraform.tfvars.example   # template for your own values (committed)
-├── terraform.tfvars           # your actual values (gitignored)
+├── main.tf                    resource group and module calls
+├── providers.tf               Terraform and azurerm provider config
+├── variables.tf               root input variables
+├── outputs.tf                 root outputs
+├── terraform.tfvars.example   template for your own values (committed)
+├── terraform.tfvars           your actual values (gitignored)
 ├── .gitignore
 ├── docs/
-│   └── architecture.png       # architecture diagram (referenced above)
+│   └── architecture.png       the diagram above
 └── modules/
-    └── aks/                   # AKS cluster module
+    └── aks/                   the AKS cluster module
         ├── main.tf
         ├── variables.tf
         └── outputs.tf
-```
 
-State is kept locally for this solo lab (gitignored, backed up to a private repo — never the public one). For team use, switch to a remote backend such as an Azure Storage account.
+State is kept locally since this is a solo lab. It's gitignored and backed up to a private repo, never the public one. If you were doing this with a team you'd want a remote backend instead, like an Azure Storage account.
 
----
+Where this stands
 
-## Build status
+I'm building this in stages, tracked as issues in the repo (features, epics, and user stories with acceptance criteria). Roughly:
 
-Built incrementally against a public backlog (features → epics → user stories, each with acceptance criteria — see the repo Issues). Phases:
-
-1. **Repeatable, low-cost lab platform** — walking skeleton, teardown/rebuild ✅ *complete*
-2. **Secure-by-default network** — segmented VNet, NSGs, controlled egress, private endpoints, private DNS — *in progress*
-3. **Zero-trust identity & encryption** — workload identity, least-privilege RBAC, Key Vault secrets + customer-managed keys — *planned*
-4. **De-identification service & audit trail** — the GPU-backed redaction workload and document-access audit log — *planned*
-5. **Operational visibility** — Container Insights and centralized logging — *planned*
+Repeatable, low-cost lab platform. Walking skeleton, teardown and rebuild. Done.
+Secure network. Segmented VNet, NSGs, controlled egress, private endpoints, private DNS. In progress.
+Zero-trust identity and encryption. Workload identity, least-privilege roles, Key Vault secrets and customer-managed keys. Planned.
+De-identification service and audit trail. The GPU-backed workload and the document-access audit log. Planned.
+Operational visibility. Container Insights and central logging. Planned.

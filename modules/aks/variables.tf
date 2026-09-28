@@ -7,3 +7,7 @@ variable "location" {
   description = "Azure region for the AKS cluster"
   type        = string
 }
+variable "aks_subnet_id" {
+  description = "Subnet ID for the AKS node pool"
+  type        = string
+}
